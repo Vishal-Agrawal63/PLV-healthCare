@@ -1,0 +1,10 @@
+# PATH: /ml/requirements.txt
+pandas
+scikit-learn
+flask
+flask-cors
+joblib
+lightgbm
+xgboost
+matplotlib  # Add this
+seaborn     # Add this
