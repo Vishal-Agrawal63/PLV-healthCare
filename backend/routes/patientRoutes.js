@@ -5,6 +5,7 @@ const Patient = require('../models/Patient');
 const router = express.Router();
 
 const ML_API_URL = 'http://127.0.0.1:5000/predict';
+const DL_API_URL = 'http://127.0.0.1:5001/predict_survival';
 // ... (other routes remain the same) ...
 router.get('/patients', async (req, res) => {
     try {
@@ -53,24 +54,24 @@ router.post('/predict', async (req, res) => {
     }
 });
 
-// @desc   Get a new survival prediction
-// @route  POST /api/predict-survival
+
+// Replace your entire predict-survival route with this one
 router.post('/predict-survival', async (req, res) => {
     try {
-        const clinicalData = req.body;
+        // The data from the frontend is already in the perfect format.
+        const clinicalData = req.body; 
 
-        // Forward the clinical data to the Python DL API
+        // Forward the data directly to the Python DL API. No translation needed.
         const { data: prediction } = await axios.post(DL_API_URL, clinicalData);
 
-        // Return the prediction from the DL API directly to the frontend
         res.status(200).json(prediction);
 
     } catch (error) {
-        console.error('Error during survival prediction:', error.message);
+        console.error('--- ERROR IN /api/predict-survival ---');
+        console.error('Error:', error.message);
         if (error.response) {
-            console.error('DL API Response Data:', error.response.data);
-        } else if (error.request) {
-            console.error('No response from DL API. Is it running on port 5001?');
+            console.error('API Response Data:', error.response.data);
+            console.error('API Response Status:', error.response.status);
         }
         res.status(500).json({ message: 'Failed to get survival prediction.' });
     }

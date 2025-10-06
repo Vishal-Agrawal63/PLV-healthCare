@@ -57,8 +57,7 @@ def predict():
     if not data or 'model_name' not in data or 'patient_data' not in data:
         return jsonify({'error': 'Invalid input format.'}), 400
 
-    model_name_raw = data['model_name']
-    model_name = model_name_raw.lower()
+    model_name = data['model_name'].lower()
     
     # --- THIS IS THE FIX ---
     # We must extract the patient_data dictionary before we can use it.

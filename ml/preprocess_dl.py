@@ -27,7 +27,7 @@ def preprocess_support_data():
         'dzgroup',
         'num.co',    # Number of comorbidities
         'scoma',     # Glasgow Coma Score
-        'hospdead'   # This is our Target variable
+        'died'   # This is our Target variable
     ]
 
     # Select only the columns that exist, and our target
