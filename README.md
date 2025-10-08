@@ -72,12 +72,15 @@ pip install -r requirements.txt
 
 # Run the preprocessing script (requires h216.csv)
 python preprocess.py
+python preprocess_dl.py 
 
 # Run the model training script
 python train_model.py
+python train_dl.py 
 
 # Run the Flask API server (leave this terminal running)
 python api.py
+python api_dl.py  
 # It should now be running on http://127.0.0.1:5000
 ```
 
@@ -138,6 +141,17 @@ From now on, you only need to follow these steps:
         python -m venv venv
         .\venv\Scripts\activate
         pip install -r requirements.txt
+        
+        * datasets used:
+        ML : h216.csv
+        DL : support_cleaned.csv 
+        
+        after that do:
+        `cd .\ml\
+        python .\preprocess.py
+        python .\preprocess_dl.py 
+        python .\train_dl.py    
+        python .\train_model.py
         ```
 
 2.  **Start the Entire Application:**
