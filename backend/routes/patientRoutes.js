@@ -6,6 +6,7 @@ const router = express.Router();
 
 const ML_API_URL = 'http://127.0.0.1:5000/predict';
 const DL_API_URL = 'http://127.0.0.1:5001/predict_survival';
+const TABNET_PCA_API_URL = 'http://127.0.0.1:5002/predict_survival_pca'; // New TabNet+PCA API
 // ... (other routes remain the same) ...
 router.get('/patients', async (req, res) => {
     try {
@@ -58,20 +59,29 @@ router.post('/predict', async (req, res) => {
 // Replace your entire predict-survival route with this one
 router.post('/predict-survival', async (req, res) => {
     try {
-        // The data from the frontend is already in the perfect format.
-        const clinicalData = req.body; 
+        const { model_name, ...clinicalData } = req.body;
+        
+        let targetApiUrl;
+        
+        // Choose the correct API based on the user's selection
+        if (model_name === 'TabNet_PCA') {
+            targetApiUrl = TABNET_PCA_API_URL;
+        } else {
+            targetApiUrl = DL_API_URL; // Default to the original MLP
+        }
 
-        // Forward the data directly to the Python DL API. No translation needed.
-        const { data: prediction } = await axios.post(DL_API_URL, clinicalData);
-
+        console.log(`Routing to ${model_name} via ${targetApiUrl}`);
+        
+        const { data: prediction } = await axios.post(targetApiUrl, clinicalData);
+        
         res.status(200).json(prediction);
 
     } catch (error) {
-        console.error('--- ERROR IN /api/predict-survival ---');
-        console.error('Error:', error.message);
+        console.error('Error during survival prediction:', error.message);
         if (error.response) {
             console.error('API Response Data:', error.response.data);
-            console.error('API Response Status:', error.response.status);
+        } else {
+            console.error('No response from a DL API. Are they running?');
         }
         res.status(500).json({ message: 'Failed to get survival prediction.' });
     }
