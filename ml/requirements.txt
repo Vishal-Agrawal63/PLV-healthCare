@@ -8,3 +8,9 @@ lightgbm
 xgboost
 matplotlib  # Add this
 seaborn     # Add this
+scikit-survival
+tensorflow
+torch
+pycox
+torchtuples
+sklearn-pandas

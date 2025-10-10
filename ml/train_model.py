@@ -1,4 +1,3 @@
-# PATH: /ml/train_model_full.py
 import pandas as pd
 import numpy as np
 import os
@@ -7,7 +6,7 @@ from time import time
 
 # Model imports
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, PolynomialFeatures
+from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet, TweedieRegressor
 from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
@@ -68,37 +67,29 @@ def load_and_prepare_data(file_path: str) -> pd.DataFrame:
     df = pd.read_csv(file_path)
 
     feature_map = {
-        'DUPERSID': 'PersonID',
-        'AGE19X': 'Age',
-        'SEX': 'Sex',
-        'RACETHX': 'Race',
-        'POVCAT19': 'PovertyCategory',
-        'INSCOV19': 'InsuranceCoverage',
-        'RTHLTH53': 'HealthStatus',
-        'OBTOTV19': 'OfficeVisits',
-        'OPTOTV19': 'OutpatientVisits',
-        'ERTOT19': 'ERVisits',
-        'IPDIS19': 'HospitalDischarges',
-        'TOTEXP19': 'TotalExpenditure',
+        'DUPERSID': 'PersonID', 'AGE19X': 'Age', 'SEX': 'Sex', 'RACETHX': 'Race',
+        'POVCAT19': 'PovertyCategory', 'INSCOV19': 'InsuranceCoverage',
+        'RTHLTH53': 'HealthStatus', 'OBTOTV19': 'OfficeVisits',
+        'OPTOTV19': 'OutpatientVisits', 'ERTOT19': 'ERVisits',
+        'IPDIS19': 'HospitalDischarges', 'TOTEXP19': 'TotalExpenditure',
     }
     df = df[list(feature_map.keys())].copy()
     df.rename(columns=feature_map, inplace=True)
 
-    # Replace negative survey codes with NaN
     for col in df.columns:
         if pd.api.types.is_numeric_dtype(df[col]):
             df[col] = df[col].apply(lambda x: np.nan if x < 0 else x)
 
     # Impute missing values
     for col in ['Age', 'OfficeVisits', 'OutpatientVisits', 'ERVisits', 'HospitalDischarges']:
-        df[col].fillna(df[col].median(), inplace=True)
+        # --- FIX #2: Use explicit assignment to avoid FutureWarning ---
+        df[col] = df[col].fillna(df[col].median())
     for col in ['Sex', 'Race', 'PovertyCategory', 'InsuranceCoverage', 'HealthStatus']:
-        df[col].fillna(df[col].mode()[0], inplace=True)
+        # --- FIX #2: Use explicit assignment to avoid FutureWarning ---
+        df[col] = df[col].fillna(df[col].mode()[0])
 
-    # Drop rows with missing target
     df.dropna(subset=['TotalExpenditure'], inplace=True)
 
-    # Cap target at 99th percentile
     cap_99 = df['TotalExpenditure'].quantile(0.99)
     df['TotalExpenditure'] = np.clip(df['TotalExpenditure'], a_min=0, a_max=cap_99)
 
@@ -116,17 +107,18 @@ def evaluate_and_store_results(name, model, X_test_scaled, y_test_dollars, resul
 
     r2 = r2_score(y_test_dollars, y_pred_dollars)
     mae = mean_absolute_error(y_test_dollars, y_pred_dollars)
-    rmse = mean_squared_error(y_test_dollars, y_pred_dollars, squared=False)
+    
+    # --- FIX #1: Calculate RMSE by taking the square root of MSE ---
+    mse = mean_squared_error(y_test_dollars, y_pred_dollars)
+    rmse = np.sqrt(mse)
+    # ----------------------------------------------------------------
+
     s_mape = smape(y_test_dollars, y_pred_dollars)
     acc_20 = accuracy_within(y_test_dollars, y_pred_dollars, pct=0.2)
 
     results_dict[name] = {
-        'R-squared': r2,
-        'MAE': mae,
-        'RMSE': rmse,
-        'SMAPE (%)': s_mape,
-        'Accuracy ±20%': acc_20,
-        'Training Time (s)': train_seconds,
+        'R-squared': r2, 'MAE': mae, 'RMSE': rmse, 'SMAPE (%)': s_mape,
+        'Accuracy ±20%': acc_20, 'Training Time (s)': train_seconds,
     }
 
 # ======================
@@ -141,41 +133,31 @@ def train_and_evaluate_models():
     df = load_and_prepare_data(h216_path)
     df_featured = engineer_features(df)
 
-    # One-hot encode categorical features
     categorical_cols = ['Sex', 'Race', 'PovertyCategory', 'InsuranceCoverage', 'HealthStatus']
     df_enc = pd.get_dummies(df_featured, columns=categorical_cols, drop_first=True)
 
-    # Prepare X, y
     X = df_enc.drop(columns=['TotalExpenditure', 'PersonID'])
     y_dollars = df_enc['TotalExpenditure']
     y_log = log1p_transform(y_dollars)
 
-    # Stratified split
     bins = pd.qcut(y_dollars, q=10, labels=False, duplicates='drop')
-    X_train, X_test, y_train_log, y_test_log, bins_train, bins_test = train_test_split(
+    X_train, X_test, y_train_log, y_test_log, _, _ = train_test_split(
         X, y_log, bins, test_size=0.2, random_state=RANDOM_STATE, stratify=bins
     )
     y_test_dollars = safe_inv_log1p(y_test_log)
 
-    # StandardScaler
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     joblib.dump(scaler, os.path.join(SCRIPT_DIR, 'scaler.pkl'))
     joblib.dump(X.columns.tolist(), os.path.join(SCRIPT_DIR, 'model_columns.pkl'))
 
-    # ======================
-    # Define models
-    # ======================
     models = {
-        # Linear models with log1p
         'LinearRegression': LinearRegression(),
         'Ridge': Ridge(alpha=1.0),
         'Lasso': Lasso(alpha=0.1),
         'ElasticNet': ElasticNet(alpha=0.1, l1_ratio=0.5),
         'Tweedie': TweedieRegressor(power=1.5, alpha=0.0, link='log', max_iter=1000),
-
-        # Tree-based models (no log transform)
         'RandomForest': RandomForestRegressor(
             n_estimators=600, max_depth=None, min_samples_split=4, min_samples_leaf=2,
             n_jobs=-1, random_state=RANDOM_STATE
@@ -199,38 +181,40 @@ def train_and_evaluate_models():
     }
 
     results = {}
+    trained_models = {}
 
-    # Train and evaluate
     for name, model in models.items():
         print(f"\n--- Training {name} ---")
         t0 = time()
-        if name in ['RandomForest', 'XGBoost', 'LightGBM', 'LightGBM_Tweedie']:
+        if name in ['RandomForest', 'XGBoost', 'LightGBM', 'LightGBM_Tweedie', 'Tweedie']:
             model.fit(X_train_scaled, safe_inv_log1p(y_train_log))
             use_log = False
         else:
             model.fit(X_train_scaled, y_train_log)
             use_log = True
         train_time = round(time() - t0, 2)
+        
+        trained_models[name] = model # Store trained model for ensemble
         evaluate_and_store_results(name, model, X_test_scaled, y_test_dollars, results, train_time, use_log=use_log)
         joblib.dump(model, os.path.join(SCRIPT_DIR, f"{name.lower()}.pkl"))
         print(f"Saved model to '{name.lower()}.pkl'")
 
-    # Ensemble (average of tree predictions)
     y_pred_ensemble = (
-        models['RandomForest'].predict(X_test_scaled) +
-        models['XGBoost'].predict(X_test_scaled) +
-        models['LightGBM'].predict(X_test_scaled)
+        trained_models['RandomForest'].predict(X_test_scaled) +
+        trained_models['XGBoost'].predict(X_test_scaled) +
+        trained_models['LightGBM'].predict(X_test_scaled)
     ) / 3
+    
+    mse_ensemble = mean_squared_error(y_test_dollars, y_pred_ensemble)
     results['Ensemble'] = {
         'R-squared': r2_score(y_test_dollars, y_pred_ensemble),
         'MAE': mean_absolute_error(y_test_dollars, y_pred_ensemble),
-        'RMSE': mean_squared_error(y_test_dollars, y_pred_ensemble, squared=False),
+        'RMSE': np.sqrt(mse_ensemble),
         'SMAPE (%)': smape(y_test_dollars, y_pred_ensemble),
         'Accuracy ±20%': accuracy_within(y_test_dollars, y_pred_ensemble, pct=0.2),
         'Training Time (s)': np.nan
     }
 
-    # Display results
     results_df = pd.DataFrame(results).T
     display_df = results_df.copy()
     display_df['MAE'] = display_df['MAE'].map(lambda x: f"${x:,.2f}")
@@ -238,16 +222,11 @@ def train_and_evaluate_models():
     display_df['R-squared'] = display_df['R-squared'].map(lambda v: f"{v:.{RESULTS_ROUND}f}")
     display_df['SMAPE (%)'] = display_df['SMAPE (%)'].map(lambda v: f"{v:.2f}%")
     display_df['Accuracy ±20%'] = display_df['Accuracy ±20%'].map(lambda v: f"{v:.2f}%")
-    columns = ['R-squared', 'MAE', 'RMSE', 'SMAPE (%)', 'Accuracy ±20%', 'Training Time (s)']
-    display_df = display_df[columns]
+    
+    print("\n--- Model Performance Summary ---")
+    print(display_df.sort_values(by='MAE'))
 
-    try:
-        print(display_df.sort_values(by='MAE', ascending=True))
-    except Exception:
-        print(display_df)
-
-    print("--------------------------------")
-    print("Training complete.")
+    print("\nTraining complete.")
 
 if __name__ == '__main__':
     train_and_evaluate_models()

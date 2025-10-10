@@ -2,8 +2,10 @@ import React, { useState } from 'react';
 import axios from 'axios';
 
 const SurvivalPrediction = () => {
-    // --- CHANGE: State now only includes the 5 original fields ---
     const [formData, setFormData] = useState({
+        // State now includes model_name
+        model_name: 'rsf', // Default to RSF as a good starting point
+        // Patient data (5 features)
         age: 65,
         sex: 0,
         dzgroup: 2,
@@ -16,7 +18,11 @@ const SurvivalPrediction = () => {
 
     const handleChange = (e) => {
         const { name, value } = e.target;
-        setFormData(prev => ({ ...prev, [name]: Number(value) }));
+        const isNumeric = e.target.type === 'number';
+        setFormData(prev => ({ 
+            ...prev, 
+            [name]: isNumeric ? Number(value) : value 
+        }));
     };
 
     const handleSubmit = async (e) => {
@@ -24,9 +30,13 @@ const SurvivalPrediction = () => {
         setLoading(true);
         setError('');
         setResult(null);
+
+        // Separate model_name from the patient_data for the payload
+        const { model_name, ...patient_data } = formData;
+        const payload = { model_name, patient_data };
+
         try {
-            // The payload sent to the API is now the smaller, 5-feature object
-            const res = await axios.post('http://localhost:3001/api/predict-survival', formData);
+            const res = await axios.post('http://localhost:3001/api/predict-survival', payload);
             setResult(res.data);
         } catch (err) {
             console.error("Prediction API error:", err);
@@ -39,13 +49,22 @@ const SurvivalPrediction = () => {
     return (
         <div className="card shadow-sm mt-4">
             <div className="card-header">
-                <h2 className="h4 mb-0">Deep Learning Survival Prediction</h2>
-                <p className="text-muted small mb-0">Enter patient clinical data to predict survival probability.</p>
+                <h2 className="h4 mb-0">Unified Survival Prediction</h2>
+                <p className="text-muted small mb-0">Select a model and enter patient data for a prediction.</p>
             </div>
             <div className="card-body">
                 <form onSubmit={handleSubmit}>
+                    {/* Model Selection Dropdown */}
+                    <div className="mb-4">
+                        <label htmlFor="model_name" className="form-label fw-bold">Select Prediction Model</label>
+                        <select className="form-select form-select-lg" id="model_name" name="model_name" value={formData.model_name} onChange={handleChange}>
+                            <option value="rsf">Random Survival Forest (Benchmark)</option>
+                            <option value="deephit">DeepHit (Best for Ranking)</option>
+                            <option value="keras_pca">Keras + PCA (Original)</option>
+                        </select>
+                    </div>
+
                     <div className="row g-3">
-                        {/* --- The form now only contains the 5 original inputs --- */}
                         <div className="col-md-4"><label className="form-label">Age</label><input type="number" name="age" value={formData.age} onChange={handleChange} className="form-control" /></div>
                         <div className="col-md-4"><label className="form-label">Sex (0=F, 1=M)</label><input type="number" name="sex" value={formData.sex} onChange={handleChange} className="form-control" /></div>
                         <div className="col-md-4"><label className="form-label">Disease Group Code</label><input type="number" name="dzgroup" value={formData.dzgroup} onChange={handleChange} className="form-control" /></div>
@@ -61,10 +80,10 @@ const SurvivalPrediction = () => {
 
                 {result && (
                     <div className="alert alert-info text-center mt-4">
-                        <h4 className="alert-heading">Prediction Result</h4>
+                        <h4 className="alert-heading">Prediction Result (using {formData.model_name.toUpperCase()})</h4>
                         <p className="display-5 fw-bold">{result.survival_probability}%</p>
                         <hr />
-                        <p className="mb-0 small">This is the model's predicted probability that the patient will survive the current hospitalization.</p>
+                        <p className="mb-0 small">This is the model's predicted probability that the patient will survive beyond 30 days.</p>
                     </div>
                 )}
             </div>
