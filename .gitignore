@@ -15,6 +15,7 @@ ml/venv/
 
 ml/*.csv
 ml/*.pkl
+ml/*.h5
 ml\patients_cleaned.csv
 ml\h216.csv
 
