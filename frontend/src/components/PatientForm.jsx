@@ -55,12 +55,19 @@ const PatientForm = ({ onNewPrediction }) => {
           {/* --- CHANGE: Update the dropdown options --- */}
           <div className="mb-4">
             <label htmlFor="model_name" className="form-label fw-bold">Select Prediction Model</label>
-            <select className="form-select form-select-lg" id="model_name" name="model_name" value={formData.model_name} onChange={handleChange}>
-              <option value="LightGBM_Tweedie">LightGBM Tweedie (Recommended)</option>
-              <option value="XGBoost">XGBoost</option>
-              <option value="LightGBM">LightGBM</option>
-              <option value="RandomForest">Random Forest</option>
-            </select>
+
+<select className="form-select form-select-lg" id="model_name" name="model_name" value={formData.model_name} onChange={handleChange}>
+  {/* The 'value' must exactly match the keys in the training script's `models` dictionary */}
+  <option value="LightGBM_Tweedie">LightGBM Tweedie (Recommended)</option>
+  <option value="XGBoost">XGBoost</option>
+  <option value="LightGBM">LightGBM</option>
+  <option value="RandomForest">Random Forest</option>
+  <option value="Tweedie">Tweedie Regressor</option>
+  <option value="LinearRegression">Linear Regression</option>
+  <option value="Ridge">Ridge Regression</option>
+  <option value="Lasso">Lasso Regression</option>
+  <option value="ElasticNet">ElasticNet</option>
+</select>
           </div>
 
           <div className="row g-3">
