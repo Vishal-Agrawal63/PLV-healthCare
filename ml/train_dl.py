@@ -1,196 +1,200 @@
-# Unified Training Script
+# train_dl.py (Corrected and Final Version)
 import pandas as pd
 import os
 import joblib
 
-# --- Keras / TensorFlow Imports ---
+# --- TensorFlow / Keras Imports ---
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout
 
-# --- Scikit-Survival (RSF) Imports ---
+# --- Scikit-Survival Imports ---
 from sksurv.ensemble import RandomSurvivalForest
 from sksurv.util import Surv
 
-# --- PyCox (DeepHit) Imports ---
+# --- PyCox / PyTorch Imports ---
 import numpy as np
 import torch
 from torch import nn
 from pycox import models
+from pycox.evaluation import EvalSurv 
 import torchtuples as tt
 
 # --- Common Imports ---
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from sklearn.compose import ColumnTransformer
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE_NAME = 'support_survival.csv'
 
 # ===================================================================
-# MODEL 1: KERAS + PCA (Your Original Model)
+# --- FIX: HELPER CLASS FOR COX-TIME MODEL ---
+# This special network handles the two inputs (features + time)
+# required by the CoxTime model.
 # ===================================================================
-def train_keras_pca_model():
+class CoxTimeMLP(nn.Module):
+    """A simple MLP that accepts features and time, then concatenates them."""
+    def __init__(self, in_features, hidden_dims=[64, 32]):
+        super().__init__()
+        # We add 1 to in_features for the concatenated time input
+        all_dims = [in_features + 1] + hidden_dims + [1]
+        layers = []
+        for i in range(len(all_dims) - 2):
+            layers.extend([
+                nn.Linear(all_dims[i], all_dims[i+1]),
+                nn.ReLU(),
+                nn.Dropout(0.3)
+            ])
+        layers.append(nn.Linear(all_dims[-2], all_dims[-1]))
+        self.network = nn.Sequential(*layers)
+        
+    def forward(self, x_features, x_time):
+        # This is the important part: it accepts two arguments
+        x_combined = torch.cat([x_features, x_time], dim=1)
+        return self.network(x_combined)
+# ===================================================================
+
+def get_pca_data(save_preprocessors=False):
     """
-    Trains a Keras binary classifier on the 'died' column, using PCA.
-    Saves the model, scaler, and PCA transformer.
+    Loads the survival data, applies scaling and PCA, and returns split datasets.
     """
-    print("==============================================")
-    print("--- Training Keras + PCA Model ---")
-    print("==============================================")
-    print("Loading original cleaned SUPPORT data...")
-    input_path = os.path.join(SCRIPT_DIR, 'support_cleaned.csv')
+    print("--- Loading data and preparing PCA components ---")
+    input_path = os.path.join(SCRIPT_DIR, DATA_FILE_NAME)
     try:
         df = pd.read_csv(input_path)
     except FileNotFoundError:
-        print(f"Error: '{input_path}' not found.")
-        return
+        print(f"FATAL ERROR: '{input_path}' not found. Please run 'prepare_data.py' first!")
+        exit()
 
-    X = df.drop('died', axis=1)
-    y = df['died']
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    features = [col for col in df.columns if col not in ['hospdead', 'd.time']]
+    df_train, df_test = train_test_split(df, test_size=0.2, random_state=42)
     
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    
-    print(f"\nApplying PCA to the {X.shape[1]} features...")
     pca = PCA(n_components=0.95)
-    X_train_pca = pca.fit_transform(X_train_scaled)
-    X_test_pca = pca.transform(X_test_scaled)
     
-    print(f"PCA reduced features from {X.shape[1]} to {pca.n_components_}")
+    x_train_scaled = scaler.fit_transform(df_train[features])
+    x_train_pca = pca.fit_transform(x_train_scaled).astype('float32')
+    x_test_pca = pca.transform(df_test[features]).astype('float32')
+
+    print(f"PCA reduced {len(features)} features to {pca.n_components_} components.")
+
+    if save_preprocessors:
+        joblib.dump(scaler, os.path.join(SCRIPT_DIR, 'universal_pca_scaler.pkl'))
+        joblib.dump(pca, os.path.join(SCRIPT_DIR, 'universal_pca_transformer.pkl'))
+        print("Universal scaler and PCA transformer saved.")
+        
+    return df_train, df_test, x_train_pca, x_test_pca
+
+# ===================================================================
+# MODEL TRAINING FUNCTIONS (Final Versions)
+# ===================================================================
+def train_keras_pca_model(df_train, df_test, x_train_pca, x_test_pca):
+    print("\n--- Training Keras + PCA Model ---")
+    y_train = df_train['hospdead']
+    y_test = df_test['hospdead']
     
     model = Sequential([
-        Dense(64, activation='relu', input_shape=(X_train_pca.shape[1],)), Dropout(0.3),
+        Dense(64, activation='relu', input_shape=(x_train_pca.shape[1],)), Dropout(0.3),
         Dense(32, activation='relu'), Dropout(0.3),
         Dense(1, activation='sigmoid')
     ])
     model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-    
-    print("\nTraining model on PCA components...")
-    # Setting verbose=0 for cleaner logs in the combined script
-    model.fit(X_train_pca, y_train, epochs=50, batch_size=32, validation_split=0.2, verbose=0) 
-    
-    loss, accuracy = model.evaluate(X_test_pca, y_test, verbose=0)
-    print(f"\nModel Evaluation: Loss={loss:.4f}, Accuracy={accuracy:.4f}")
-    
+    model.fit(x_train_pca, y_train, epochs=50, batch_size=32, verbose=0) 
+    loss, acc = model.evaluate(x_test_pca, y_test, verbose=0)
+    print(f"Evaluation: Accuracy={acc:.4f}")
     model.save(os.path.join(SCRIPT_DIR, 'keras_pca_model.h5'))
-    joblib.dump(scaler, os.path.join(SCRIPT_DIR, 'keras_pca_scaler.pkl'))
-    joblib.dump(pca, os.path.join(SCRIPT_DIR, 'keras_pca_pca.pkl'))
-    print("\nSuccessfully saved Keras model, scaler, and PCA transformer.")
+    print("Keras+PCA model saved.")
 
-# ===================================================================
-# MODEL 2: RANDOM SURVIVAL FOREST (RSF)
-# ===================================================================
-def train_rsf_model():
-    """
-    Trains a Random Survival Forest model on the time-to-event data.
-    Saves the trained model.
-    """
-    print("\n\n==============================================")
-    print("--- Training Random Survival Forest Model ---")
-    print("==============================================")
-    print("Loading survival data...")
-    input_path = os.path.join(SCRIPT_DIR, 'support_survival.csv')
-    try:
-        df = pd.read_csv(input_path)
-    except FileNotFoundError:
-        print(f"Error: '{input_path}' not found. Run prepare_survival_data.py first.")
-        return
+def train_rsf_pca_model(df_train, df_test, x_train_pca, x_test_pca):
+    print("\n--- Training Random Survival Forest + PCA Model ---")
+    y_train = Surv.from_dataframe('hospdead', 'd.time', df_train)
+    y_test = Surv.from_dataframe('hospdead', 'd.time', df_test)
+    
+    rsf = RandomSurvivalForest(n_estimators=100, min_samples_leaf=15, n_jobs=-1, random_state=42)
+    rsf.fit(x_train_pca, y_train)
+    score = rsf.score(x_test_pca, y_test)
+    print(f"Evaluation (Concordance Index): {score:.4f}")
+    joblib.dump(rsf, os.path.join(SCRIPT_DIR, 'rsf_pca_model.pkl'))
+    print("RSF+PCA model saved.")
 
-    X = df.drop(['hospdead', 'd.time'], axis=1)
-    y = Surv.from_dataframe('hospdead', 'd.time', df)
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    rsf = RandomSurvivalForest(n_estimators=100, min_samples_split=10, min_samples_leaf=15, n_jobs=-1, random_state=42)
-    
-    print("Fitting RSF model...")
-    rsf.fit(X_train, y_train)
-    
-    score = rsf.score(X_test, y_test)
-    print(f"\nModel Evaluation (Concordance Index): {score:.4f}")
-    
-    joblib.dump(rsf, os.path.join(SCRIPT_DIR, 'rsf_model.pkl'))
-    print(f"RSF model saved to rsf_model.pkl")
-
-# ===================================================================
-# MODEL 3: DEEPHIT
-# ===================================================================
-def train_deephit_model():
-    """
-    Trains a DeepHit survival model on the time-to-event data.
-    Saves the model weights and necessary preprocessors.
-    """
-    print("\n\n==============================================")
-    print("--- Training DeepHit Model ---")
-    print("==============================================")
-    print("Loading survival data...")
-    input_path = os.path.join(SCRIPT_DIR, 'support_survival.csv')
-    try:
-        df = pd.read_csv(input_path)
-    except FileNotFoundError:
-        print(f"Error: '{input_path}' not found. Run prepare_survival_data.py first.")
-        return
-    
-    df_train = df.sample(frac=0.8, random_state=42)
-    df_val = df_train.sample(frac=0.2, random_state=123)
-    
-    # Using ColumnTransformer to apply different preprocessing to different columns
-    cols_standardize = ['age', 'num.co', 'scoma']
-    cols_leave = ['sex', 'dzgroup']
-
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', StandardScaler(), cols_standardize),
-            ('cat', 'passthrough', cols_leave)
-        ])
-    
-    x_train = preprocessor.fit_transform(df_train).astype('float32')
-    x_val = preprocessor.transform(df_val).astype('float32')
-    
-    num_durations = 10
-    # Get the label transformer directly from the model class
-    labtrans = models.DeepHitSingle.label_transform(num_durations)
-    
+def train_deephit_pca_model(df_train, df_test, x_train_pca, x_test_pca):
+    print("\n--- Training DeepHit + PCA Model ---")
     get_target = lambda df: (df['d.time'].values, df['hospdead'].values)
+    labtrans = models.DeepHitSingle.label_transform(10)
     y_train = labtrans.fit_transform(*get_target(df_train))
-    y_val = labtrans.transform(*get_target(df_val))
 
-    in_features = x_train.shape[1]
-    out_features = labtrans.out_features
+    net = nn.Sequential(
+        nn.Linear(x_train_pca.shape[1], 64), nn.ReLU(), nn.Dropout(0.3),
+        nn.Linear(64, 32), nn.ReLU(), nn.Dropout(0.3),
+        nn.Linear(32, labtrans.out_features)
+    )
+    model = models.DeepHitSingle(net, tt.optim.Adam, alpha=0.2, sigma=0.1, duration_index=labtrans.cuts)
+    model.fit(x_train_pca, y_train, batch_size=128, epochs=100, verbose=False, callbacks=[tt.callbacks.EarlyStopping()])
+    print("Model fitting complete.")
+    model.save_model_weights(os.path.join(SCRIPT_DIR, 'deephit_pca_model.pt'))
+    joblib.dump(labtrans, os.path.join(SCRIPT_DIR, 'deephit_pca_labtrans.pkl'))
+    print("DeepHit+PCA model and labtrans saved.")
+    
+def train_deepsurv_pca_model(df_train, df_test, x_train_pca, x_test_pca):
+    print("\n--- Training DeepSurv + PCA Model ---")
+    get_target = lambda df: (df['d.time'].values, df['hospdead'].values)
+    y_train = get_target(df_train)
+    y_test = get_target(df_test)
     
     net = nn.Sequential(
-        nn.Linear(in_features, 64), nn.ReLU(), nn.Dropout(0.3),
+        nn.Linear(x_train_pca.shape[1], 64), nn.ReLU(), nn.Dropout(0.3),
         nn.Linear(64, 32), nn.ReLU(), nn.Dropout(0.3),
-        nn.Linear(32, out_features)
+        nn.Linear(32, 1)
     )
+    model = models.CoxPH(net, tt.optim.Adam)
+    model.fit(x_train_pca, y_train, batch_size=128, epochs=100, verbose=False, callbacks=[tt.callbacks.EarlyStopping()])
+    _ = model.compute_baseline_hazards()
+    surv_df = model.predict_surv_df(x_test_pca)
     
-    model = models.DeepHitSingle(net, tt.optim.Adam, alpha=0.2, sigma=0.1, duration_index=labtrans.cuts)
-    
-    batch_size, epochs = 64, 100
-    callbacks = [tt.callbacks.EarlyStopping()]
-    
-    print("\nFitting DeepHit model...")
-    # Setting verbose=False for cleaner logs during the sequential run
-    model.fit(x_train, y_train, batch_size, epochs, callbacks, val_data=(x_val, y_val), verbose=False)
+    y_test_durations, y_test_events = y_test
+    ev = EvalSurv(surv_df, y_test_durations, y_test_events, censor_surv='km')
+    c_index = ev.concordance_td()
+    print(f"Evaluation (Concordance Index): {c_index:.4f}")
+    model.save_model_weights(os.path.join(SCRIPT_DIR, 'deepsurv_pca_model.pt'))
+    print("DeepSurv+PCA model saved.")
 
-    # Use the correct, updated method name 'save_model_weights'
-    model.save_model_weights(os.path.join(SCRIPT_DIR, 'deephit_model.pt'))
-    
-    joblib.dump(preprocessor, os.path.join(SCRIPT_DIR, 'deephit_preprocessor.pkl'))
-    joblib.dump(labtrans, os.path.join(SCRIPT_DIR, 'deephit_labtrans.pkl'))
-    print("\nSuccessfully saved DeepHit model and preprocessors.")
+def train_coxtime_pca_model(df_train, df_test, x_train_pca, x_test_pca):
+    print("\n--- Training Cox-Time + PCA Model ---")
+    get_target = lambda df: (df['d.time'].values, df['hospdead'].values)
+    labtrans = models.CoxTime.label_transform()
+    y_train = labtrans.fit_transform(*get_target(df_train))
+    y_test = get_target(df_test)
 
+    # --- FIX: Use the special CoxTimeMLP network ---
+    net = CoxTimeMLP(in_features=x_train_pca.shape[1])
+    # ---
+    
+    model = models.CoxTime(net, tt.optim.Adam, labtrans=labtrans)
+    model.fit(x_train_pca, y_train, batch_size=128, epochs=100, verbose=False, callbacks=[tt.callbacks.EarlyStopping()])
+    
+    _ = model.compute_baseline_hazards()
+    surv_df = model.predict_surv_df(x_test_pca)
+    y_test_durations, y_test_events = y_test
+    ev = EvalSurv(surv_df, y_test_durations, y_test_events, censor_surv='km')
+    c_index = ev.concordance_td()
+    
+    print(f"Evaluation (Concordance Index): {c_index:.4f}")
+    model.save_model_weights(os.path.join(SCRIPT_DIR, 'coxtime_pca_model.pt'))
+    joblib.dump(labtrans, os.path.join(SCRIPT_DIR, 'coxtime_pca_labtrans.pkl'))
+    print("Cox-Time+PCA model and labtrans saved.")
+    
 # ===================================================================
 # MAIN EXECUTION BLOCK
 # ===================================================================
 if __name__ == '__main__':
-    print("Starting unified training process for all models...")
+    print("Starting unified PCA-based training process...")
     
-    train_keras_pca_model()
-    train_rsf_model()
-    train_deephit_model()
+    df_train, df_test, x_train_pca, x_test_pca = get_pca_data(save_preprocessors=True)
     
-    print("\n\nAll models have been trained successfully!")
+    train_keras_pca_model(df_train, df_test, x_train_pca, x_test_pca)
+    train_rsf_pca_model(df_train, df_test, x_train_pca, x_test_pca)
+    train_deephit_pca_model(df_train, df_test, x_train_pca, x_test_pca)
+    train_deepsurv_pca_model(df_train, df_test, x_train_pca, x_test_pca)
+    train_coxtime_pca_model(df_train, df_test, x_train_pca, x_test_pca)
+    
+    print("\n\nAll PCA-based models have been trained successfully!")
