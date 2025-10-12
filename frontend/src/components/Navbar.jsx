@@ -10,11 +10,22 @@ const Navbar = () => {
         <div className="collapse navbar-collapse">
           <ul className="navbar-nav me-auto mb-2 mb-lg-0">
             <li className="nav-item">
-              {/* --- FIX #3: Remove the 'exact' prop from this line --- */}
-              <NavLink className="nav-link" activeClassName="active" to="/">PLV Prediction</NavLink>
+              {/* --- FIX #1: Update NavLink for React Router v6 --- */}
+              <NavLink 
+                className={({ isActive }) => "nav-link" + (isActive ? " active" : "")} 
+                to="/"
+              >
+                PLV Prediction
+              </NavLink>
             </li>
             <li className="nav-item">
-              <NavLink className="nav-link" activeClassName="active" to="/survival">DL Survival Analysis</NavLink>
+              {/* --- FIX #2: Update NavLink for React Router v6 --- */}
+              <NavLink 
+                className={({ isActive }) => "nav-link" + (isActive ? " active" : "")} 
+                to="/survival"
+              >
+                DL Survival Analysis
+              </NavLink>
             </li>
           </ul>
         </div>

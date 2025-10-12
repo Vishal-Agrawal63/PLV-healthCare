@@ -1,4 +1,4 @@
-# Unified Prediction API
+# PATH: /ml/api_dl.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pandas as pd
@@ -7,12 +7,13 @@ import joblib
 import os
 import torch
 from torch import nn
+import torchtuples as tt
 
 # --- Import ML Libraries ---
 from tensorflow.keras.models import load_model as load_keras_model
 from pycox import models as pycox_models
-from sksurv.ensemble import RandomSurvivalForest 
-from sklearn.compose import ColumnTransformer 
+from sksurv.ensemble import RandomSurvivalForest
+from sklearn.compose import ColumnTransformer
 
 app = Flask(__name__)
 CORS(app)
@@ -20,6 +21,36 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # --- Global dictionary to hold all loaded models and preprocessors ---
 loaded_artifacts = {}
+
+# ===================================================================
+# Custom Network for CoxTime to handle multiple inputs
+# THIS MUST BE IDENTICAL TO THE ONE IN THE TRAINING SCRIPT
+# ===================================================================
+class MLP_CoxTime(nn.Module):
+    """
+    A custom MLP class is needed for CoxTime because its `fit` method
+    passes both patient features (x) and time information (t) to the
+    network's forward pass. A standard nn.Sequential only accepts one input.
+
+    This class defines a `forward` method that accepts both `x` and `t`,
+    but only passes `x` to the sequential layers, which is the expected
+    behavior for this model architecture.
+    """
+    def __init__(self, in_features, num_nodes, out_features, batch_norm=False, dropout=0.1):
+        super().__init__()
+        layers = []
+        for n_in, n_out in zip([in_features] + num_nodes, num_nodes + [out_features]):
+            layers.append(nn.Linear(n_in, n_out))
+            layers.append(nn.ReLU())
+            if batch_norm:
+                layers.append(nn.BatchNorm1d(n_out))
+            if dropout:
+                layers.append(nn.Dropout(dropout))
+        layers = layers[:-1]
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x, t):
+        return self.net(x)
 
 def load_all_models():
     """Load all available models and their preprocessors into memory on startup."""
@@ -42,15 +73,12 @@ def load_all_models():
     except Exception as e:
         print(f"Warning: Could not load RSF model. {e}")
         
-    # --- 3. Load DeepHit Model (CORRECTED) ---
+    # --- 3. Load DeepHit Model ---
     try:
-        # --- FIX 1: Load the correct preprocessor file ---
         preprocessor = joblib.load(os.path.join(SCRIPT_DIR, 'deephit_preprocessor.pkl'))
         labtrans = joblib.load(os.path.join(SCRIPT_DIR, 'deephit_labtrans.pkl'))
         
-        # A robust way to determine the number of input features after transformation
         in_features = sum(len(cols) for name, trans, cols in preprocessor.transformers_ if trans != 'drop')
-
         out_features = labtrans.out_features
         net = nn.Sequential(
             nn.Linear(in_features, 64), nn.ReLU(), nn.Dropout(0.3),
@@ -59,14 +87,42 @@ def load_all_models():
         )
         model = pycox_models.DeepHitSingle(net, duration_index=labtrans.cuts)
         
-        # --- FIX 2: Use the correct method to load weights ---
         model.load_model_weights(os.path.join(SCRIPT_DIR, 'deephit_model.pt'))
         
-        # --- FIX 3: Store the preprocessor with the correct key ---
         loaded_artifacts['deephit'] = {'model': model, 'preprocessor': preprocessor, 'labtrans': labtrans}
         print("DeepHit model loaded successfully.")
     except Exception as e:
         print(f"Warning: Could not load DeepHit model. {e}")
+    
+    # --- 4. Load Cox-Time Model ---
+    try:
+        preprocessor = joblib.load(os.path.join(SCRIPT_DIR, 'coxtime_preprocessor.pkl'))
+        labtrans = joblib.load(os.path.join(SCRIPT_DIR, 'coxtime_labtrans.pkl'))
+        baseline_hazards = joblib.load(os.path.join(SCRIPT_DIR, 'coxtime_baseline_hazards.pkl'))
+
+        in_features = sum(len(cols) for name, trans, cols in preprocessor.transformers_ if trans != 'drop')
+        
+        net = MLP_CoxTime(
+            in_features=in_features,
+            num_nodes=[64, 32],
+            out_features=1,
+            batch_norm=False,
+            dropout=0.3
+        )
+        model = pycox_models.CoxTime(net)
+
+        model.load_model_weights(os.path.join(SCRIPT_DIR, 'coxtime_model.pt'))
+        
+        loaded_artifacts['coxtime'] = {
+            'model': model, 
+            'preprocessor': preprocessor, 
+            'labtrans': labtrans,
+            'baseline_hazards': baseline_hazards
+        }
+        print("Cox-Time model loaded successfully.")
+    except Exception as e:
+        print(f"Warning: Could not load Cox-Time model. {e}")
+
 
 @app.route('/predict_survival', methods=['POST'])
 def predict():
@@ -82,12 +138,10 @@ def predict():
 
     try:
         input_df = pd.DataFrame([patient_data])
+        prediction_time = 30
         
-        # --- Route to the correct prediction logic based on model_name ---
         if model_name == 'keras_pca':
             artifacts = loaded_artifacts['keras_pca']
-            # The keras model expects specific column names from its training data,
-            # which might differ from the survival data.
             keras_cols = artifacts['scaler'].feature_names_in_
             input_df_keras = input_df[keras_cols]
             
@@ -99,27 +153,47 @@ def predict():
         elif model_name == 'rsf':
             artifacts = loaded_artifacts['rsf']
             survival_funcs = artifacts['model'].predict_survival_function(input_df)
-            survival_probability = survival_funcs[0](30) # Get probability at 30 days
+            survival_probability = survival_funcs[0](prediction_time) 
 
         elif model_name == 'deephit':
-            # --- FIX 4: Use the correct preprocessor key ---
             artifacts = loaded_artifacts['deephit']
             processed_input = artifacts['preprocessor'].transform(input_df).astype('float32')
             surv_df = artifacts['model'].predict_surv_df(processed_input)
             
-            prediction_time = 30
             idx = np.searchsorted(surv_df.columns, prediction_time, side='right') - 1
             survival_probability = surv_df.iloc[0, max(0, idx)]
+
+        elif model_name == 'coxtime':
+            # --- THIS IS THE FINAL, CORRECTED LOGIC ---
+            artifacts = loaded_artifacts['coxtime']
+            processed_input = artifacts['preprocessor'].transform(input_df).astype('float32')
             
+            # 1. Attach the loaded baseline hazards to the model instance.
+            #    The attribute name must end with an underscore.
+            artifacts['model'].baseline_hazards_ = artifacts['baseline_hazards']
+            
+            # 2. Call predict_surv_df WITHOUT the keyword argument.
+            #    The model will now find the .baseline_hazards_ attribute internally.
+            surv_df = artifacts['model'].predict_surv_df(processed_input)
+            
+            # 3. Interpolate the result as before.
+            survival_probability = np.interp(
+                prediction_time,
+                surv_df.index,
+                surv_df.iloc[:, 0]
+            )
+            # ----------------------------------------------
+
         else:
             return jsonify({'error': 'Invalid model name specified.'}), 400
 
         return jsonify({'survival_probability': round(float(survival_probability) * 100, 2)})
         
     except Exception as e:
+        print(f"Error during prediction for model '{model_name}': {type(e).__name__} - {str(e)}")
         return jsonify({'error': f'An error occurred during prediction: {str(e)}'}), 500
 
-# --- Load models on startup ---
+# --- Load all models when the Flask application starts ---
 load_all_models()
 
 if __name__ == '__main__':

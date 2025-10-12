@@ -1,4 +1,4 @@
-# Unified Training Script
+# PATH: /ml/train_dl.py
 import pandas as pd
 import os
 import joblib
@@ -11,7 +11,7 @@ from tensorflow.keras.layers import Dense, Dropout
 from sksurv.ensemble import RandomSurvivalForest
 from sksurv.util import Surv
 
-# --- PyCox (DeepHit) Imports ---
+# --- PyCox Imports ---
 import numpy as np
 import torch
 from torch import nn
@@ -25,6 +25,40 @@ from sklearn.decomposition import PCA
 from sklearn.compose import ColumnTransformer
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ===================================================================
+# Custom Network for CoxTime to handle multiple inputs
+# ===================================================================
+class MLP_CoxTime(nn.Module):
+    """
+    A custom MLP class is needed for CoxTime because its `fit` method
+    passes both patient features (x) and time information (t) to the
+    network's forward pass. A standard nn.Sequential only accepts one input.
+
+    This class defines a `forward` method that accepts both `x` and `t`,
+    but only passes `x` to the sequential layers, which is the expected
+    behavior for this model architecture.
+    """
+    def __init__(self, in_features, num_nodes, out_features, batch_norm=False, dropout=0.1):
+        super().__init__()
+        # Simplified layer creation
+        layers = []
+        for n_in, n_out in zip([in_features] + num_nodes, num_nodes + [out_features]):
+            layers.append(nn.Linear(n_in, n_out))
+            layers.append(nn.ReLU())
+            if batch_norm:
+                layers.append(nn.BatchNorm1d(n_out))
+            if dropout:
+                layers.append(nn.Dropout(dropout))
+        # Remove the last activation, as is typical for regression outputs
+        layers = layers[:-1]
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x, t):
+        # The key fix: This forward method accepts both x and t,
+        # but the network only processes x.
+        return self.net(x)
+
 
 # ===================================================================
 # MODEL 1: KERAS + PCA (Your Original Model)
@@ -69,7 +103,6 @@ def train_keras_pca_model():
     model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
     
     print("\nTraining model on PCA components...")
-    # Setting verbose=0 for cleaner logs in the combined script
     model.fit(X_train_pca, y_train, epochs=50, batch_size=32, validation_split=0.2, verbose=0) 
     
     loss, accuracy = model.evaluate(X_test_pca, y_test, verbose=0)
@@ -137,7 +170,6 @@ def train_deephit_model():
     df_train = df.sample(frac=0.8, random_state=42)
     df_val = df_train.sample(frac=0.2, random_state=123)
     
-    # Using ColumnTransformer to apply different preprocessing to different columns
     cols_standardize = ['age', 'num.co', 'scoma']
     cols_leave = ['sex', 'dzgroup']
 
@@ -151,7 +183,6 @@ def train_deephit_model():
     x_val = preprocessor.transform(df_val).astype('float32')
     
     num_durations = 10
-    # Get the label transformer directly from the model class
     labtrans = models.DeepHitSingle.label_transform(num_durations)
     
     get_target = lambda df: (df['d.time'].values, df['hospdead'].values)
@@ -173,15 +204,94 @@ def train_deephit_model():
     callbacks = [tt.callbacks.EarlyStopping()]
     
     print("\nFitting DeepHit model...")
-    # Setting verbose=False for cleaner logs during the sequential run
     model.fit(x_train, y_train, batch_size, epochs, callbacks, val_data=(x_val, y_val), verbose=False)
-
-    # Use the correct, updated method name 'save_model_weights'
     model.save_model_weights(os.path.join(SCRIPT_DIR, 'deephit_model.pt'))
     
     joblib.dump(preprocessor, os.path.join(SCRIPT_DIR, 'deephit_preprocessor.pkl'))
     joblib.dump(labtrans, os.path.join(SCRIPT_DIR, 'deephit_labtrans.pkl'))
     print("\nSuccessfully saved DeepHit model and preprocessors.")
+
+# ===================================================================
+# MODEL 4: COX-TIME
+# ===================================================================
+def train_coxtime_model():
+    """
+    Trains a Cox-Time survival model, which can model time-varying effects.
+    Saves the model weights and necessary preprocessors.
+    """
+    print("\n\n==============================================")
+    print("--- Training Cox-Time Model ---")
+    print("==============================================")
+    print("Loading survival data...")
+    input_path = os.path.join(SCRIPT_DIR, 'support_survival.csv')
+    try:
+        df = pd.read_csv(input_path)
+    except FileNotFoundError:
+        print(f"Error: '{input_path}' not found. Run prepare_survival_data.py first.")
+        return
+
+    df_train = df.sample(frac=0.8, random_state=42)
+    # Note: df_val is created from df_train, not the original df. This is intentional.
+    df_val = df_train.sample(frac=0.2, random_state=123)
+    df_train = df_train.drop(df_val.index) # Ensure validation set is not in training set
+
+    cols_standardize = ['age', 'num.co', 'scoma']
+    cols_leave = ['sex', 'dzgroup']
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', StandardScaler(), cols_standardize),
+            ('cat', 'passthrough', cols_leave)
+        ])
+
+    x_train = preprocessor.fit_transform(df_train).astype('float32')
+    
+    labtrans = models.CoxTime.label_transform()
+    
+    get_target = lambda df: (df['d.time'].values, df['hospdead'].values)
+    y_train = labtrans.fit_transform(*get_target(df_train))
+
+    in_features = x_train.shape[1]
+    
+    net = MLP_CoxTime(
+        in_features=in_features,
+        num_nodes=[64, 32],
+        out_features=1,
+        batch_norm=False,
+        dropout=0.3
+    )
+    
+    model = models.CoxTime(net, tt.optim.Adam)
+    
+    batch_size, epochs = 64, 100
+    callbacks = [tt.callbacks.EarlyStopping()]
+    
+    # We still need the original (unsorted) x_val and y_val for the fitting process
+    x_val = preprocessor.transform(df_val).astype('float32')
+    y_val = labtrans.transform(*get_target(df_val))
+    
+    print("\nFitting Cox-Time model...")
+    log = model.fit(x_train, y_train, batch_size, epochs, callbacks, val_data=(x_val, y_val), verbose=False)
+
+    print("Computing baseline hazards for Cox-Time model...")
+    
+    # --- THIS IS THE FIX ---
+    # 1. Sort the validation dataframe by the duration column ('d.time').
+    df_val_sorted = df_val.sort_values(by='d.time')
+    
+    # 2. Re-transform the features and target based on this sorted dataframe.
+    x_val_sorted = preprocessor.transform(df_val_sorted).astype('float32')
+    y_val_sorted = labtrans.transform(*get_target(df_val_sorted))
+
+    # 3. Pass the new, sorted data to compute_baseline_hazards.
+    baseline_hazards = model.compute_baseline_hazards(x_val_sorted, y_val_sorted)
+    # -----------------------
+
+    model.save_model_weights(os.path.join(SCRIPT_DIR, 'coxtime_model.pt'))
+    joblib.dump(baseline_hazards, os.path.join(SCRIPT_DIR, 'coxtime_baseline_hazards.pkl'))
+    joblib.dump(preprocessor, os.path.join(SCRIPT_DIR, 'coxtime_preprocessor.pkl'))
+    joblib.dump(labtrans, os.path.join(SCRIPT_DIR, 'coxtime_labtrans.pkl'))
+    print("\nSuccessfully saved Cox-Time model, preprocessors, and baseline hazards.")
 
 # ===================================================================
 # MAIN EXECUTION BLOCK
@@ -192,5 +302,6 @@ if __name__ == '__main__':
     train_keras_pca_model()
     train_rsf_model()
     train_deephit_model()
+    train_coxtime_model()
     
     print("\n\nAll models have been trained successfully!")
