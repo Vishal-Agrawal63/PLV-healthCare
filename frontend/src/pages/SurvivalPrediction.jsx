@@ -60,6 +60,7 @@ const SurvivalPrediction = () => {
                         <label htmlFor="model_name" className="form-label fw-bold">Select Prediction Model</label>
                         <select className="form-select form-select-lg" id="model_name" name="model_name" value={formData.model_name} onChange={handleChange}>
                             <option value="coxtime">Cox-Time (Best for Calibration)</option>
+                            <option value="deepsurv">DeepSurv (Deep Learning Baseline)</option>
                             <option value="deephit">DeepHit (Best for Ranking)</option>
                             <option value="rsf">Random Survival Forest (Benchmark)</option>
                             <option value="keras_pca">Keras + PCA (Original)</option>

@@ -20,7 +20,7 @@ import torchtuples as tt
 
 # --- Common Imports ---
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.decomposition import PCA
 from sklearn.compose import ColumnTransformer
 
@@ -293,6 +293,86 @@ def train_coxtime_model():
     joblib.dump(labtrans, os.path.join(SCRIPT_DIR, 'coxtime_labtrans.pkl'))
     print("\nSuccessfully saved Cox-Time model, preprocessors, and baseline hazards.")
 
+# Place this function inside train_dl.py
+
+# ===================================================================
+# MODEL 5: DEEPSURV (CoxPH) - THIS IS THE FULLY CORRECTED VERSION
+# ===================================================================
+def train_deepsurv_model():
+    """
+    Trains a DeepSurv (CoxPH) model and saves the full preprocessor object.
+    """
+    print("\n\n==============================================")
+    print("--- Training DeepSurv (CoxPH) Model ---")
+    print("==============================================")
+    print("Loading survival data...")
+    input_path = os.path.join(SCRIPT_DIR, 'support_survival.csv')
+    try:
+        df = pd.read_csv(input_path)
+    except FileNotFoundError:
+        print(f"Error: '{input_path}' not found. Run prepare_survival_data.py first.")
+        return
+
+    df_train = df.sample(frac=0.8, random_state=42)
+    df_val = df_train.sample(frac=0.2, random_state=123)
+    df_train = df_train.drop(df_val.index)
+
+    # --- THIS IS THE CORRECT PREPROCESSING LOGIC ---
+    # Define which columns get which treatment
+    cols_standardize = ['age', 'num.co', 'scoma']
+    categorical_cols = ['sex', 'dzgroup']
+
+    # Create the preprocessor object
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', StandardScaler(), cols_standardize),
+            ('cat', OneHotEncoder(handle_unknown='ignore', drop='first'), categorical_cols)
+        ]
+    )
+
+    # Separate features (X) from the target (y)
+    X_train_df = df_train.drop(['d.time', 'hospdead'], axis=1)
+    x_train = preprocessor.fit_transform(X_train_df).astype('float32')
+    X_val_df = df_val.drop(['d.time', 'hospdead'], axis=1)
+    x_val = preprocessor.transform(X_val_df).astype('float32')
+    # ----------------------------------------------
+
+    labtrans = models.CoxTime.label_transform()
+    get_target = lambda df: (df['d.time'].values, df['hospdead'].values)
+    y_train = labtrans.fit_transform(*get_target(df_train))
+    y_val = labtrans.transform(*get_target(df_val))
+
+    in_features = x_train.shape[1]
+
+    net = nn.Sequential(
+        nn.Linear(in_features, 64), nn.ReLU(), nn.Dropout(0.3),
+        nn.Linear(64, 32), nn.ReLU(), nn.Dropout(0.3),
+        nn.Linear(32, 1)
+    )
+
+    model = models.CoxPH(net, tt.optim.Adam)
+    batch_size, epochs = 64, 100
+    callbacks = [tt.callbacks.EarlyStopping()]
+
+    print("\nFitting DeepSurv model...")
+    model.fit(x_train, y_train, batch_size, epochs, callbacks, val_data=(x_val, y_val), verbose=False)
+
+    print("Computing baseline hazards for DeepSurv model...")
+    df_val_sorted = df_val.sort_values(by='d.time')
+    X_val_sorted_df = df_val_sorted.drop(['d.time', 'hospdead'], axis=1)
+    x_val_sorted = preprocessor.transform(X_val_sorted_df).astype('float32')
+    y_val_sorted = labtrans.transform(*get_target(df_val_sorted))
+    baseline_hazards = model.compute_baseline_hazards(x_val_sorted, y_val_sorted)
+
+    # --- SAVE THE CORRECT ARTIFACTS ---
+    model.save_model_weights(os.path.join(SCRIPT_DIR, 'deepsurv_model.pt'))
+    # This line now correctly saves the preprocessor object
+    joblib.dump(preprocessor, os.path.join(SCRIPT_DIR, 'deepsurv_preprocessor.pkl'))
+    joblib.dump(baseline_hazards, os.path.join(SCRIPT_DIR, 'deepsurv_baseline_hazards.pkl'))
+    joblib.dump(labtrans, os.path.join(SCRIPT_DIR, 'deepsurv_labtrans.pkl'))
+    joblib.dump(df_val, os.path.join(SCRIPT_DIR, 'deepsurv_df_val.pkl')) 
+    print("\nSuccessfully saved DeepSurv model, PREPROCESSOR, and baseline hazards.")
+
 # ===================================================================
 # MAIN EXECUTION BLOCK
 # ===================================================================
@@ -303,5 +383,6 @@ if __name__ == '__main__':
     train_rsf_model()
     train_deephit_model()
     train_coxtime_model()
-    
+    train_deepsurv_model()
+
     print("\n\nAll models have been trained successfully!")
