@@ -217,13 +217,13 @@ def predict():
             # This is the final, correct logic for DeepSurv
             artifacts = loaded_artifacts['deepsurv']
             processed_input = artifacts['preprocessor'].transform(input_df).astype('float32')
-            
+
             # For DeepSurv (CoxPH), we PASS THE HAZARDS AS A PARAMETER
             surv_df = artifacts['model'].predict_surv_df(
-                processed_input, 
-                baseline_hazards_=artifacts['baseline_hazards']
+                processed_input,
+                baseline_hazards_=artifacts['baseline_hazards'] # Correct implementation
             )
-            
+
             survival_probability = np.interp(prediction_time, surv_df.index, surv_df.iloc[:, 0])
 
         else:
